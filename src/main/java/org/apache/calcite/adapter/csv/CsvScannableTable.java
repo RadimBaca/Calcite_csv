@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class CsvScannableTable extends CsvTable
     implements ScannableTable {
   /** Creates a CsvScannableTable. */
-  CsvScannableTable(Source source, RelProtoDataType protoRowType) {
+  public CsvScannableTable(Source source, RelProtoDataType protoRowType) {
     super(source, protoRowType);
   }
 

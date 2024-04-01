@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class CsvTranslatableTable extends CsvTable
     implements QueryableTable, TranslatableTable {
   /** Creates a CsvTable. */
-  CsvTranslatableTable(Source source, RelProtoDataType protoRowType) {
+  public CsvTranslatableTable(Source source, RelProtoDataType protoRowType) {
     super(source, protoRowType);
   }
 
