@@ -1,7 +1,7 @@
-ID:int,Name:string,Salary:int
-1,Radim,100
-2,John,200
-3,John,300
-4,Mery,400
-5,Augustin,230
-6,Karolina,150
+ID:int,Name:string,Salary:int,DepartmentID:int
+1,Radim,100,1
+2,John,200,2
+3,John,300,1
+4,Mery,400,1
+5,Augustin,230,2
+6,Karolina,150,1

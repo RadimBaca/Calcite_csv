@@ -1,0 +1,3 @@
+ID:int,Name:string,City:string
+1,Development,Ostrava
+2,Sales,Brno

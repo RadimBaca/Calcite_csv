@@ -19,6 +19,8 @@ import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.linq4j.QueryProvider;
 import org.apache.calcite.plan.*;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.rel.RelNode;
@@ -64,69 +66,93 @@ public class Main
     public static void main( String[] args ) throws SqlParseException {
         BasicConfigurator.configure();
 
-//        TODO 1 - zprovoznit SQL nad nejakymi csv daty (ClickBench?)
-
-        // Initialize schema
         CalciteSchema schema = CalciteSchema.createRootSchema(false);
 //        RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
         RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl();
-        RelDataTypeFactory.Builder builder = new RelDataTypeFactory.Builder(typeFactory);
 
         // Define table schema
-        builder.add("ID", typeFactory.createSqlType(SqlTypeName.INTEGER));
-        builder.add("Name", typeFactory.createSqlType(SqlTypeName.VARCHAR, 20));
-        builder.add("Salary", typeFactory.createSqlType(SqlTypeName.INTEGER));
-        String fileName = "person.csv";
-        final File base = new File("src/main/resources");
-        final Source source = Sources.file(base, fileName);
-        final RelProtoDataType protoRowType = RelDataTypeImpl.proto(builder.build());
-        schema.add("Person", new CsvScannableTable(source, protoRowType));
+        {
+            // Person table
+            RelDataTypeFactory.Builder builder = new RelDataTypeFactory.Builder(typeFactory);
+            builder.add("ID", typeFactory.createSqlType(SqlTypeName.INTEGER));
+            builder.add("Name", typeFactory.createSqlType(SqlTypeName.VARCHAR, 20));
+            builder.add("Salary", typeFactory.createSqlType(SqlTypeName.INTEGER));
+            builder.add("DeparmentID", typeFactory.createSqlType(SqlTypeName.INTEGER));
+            String fileName = "person.csv";
+            final File base = new File("src/main/resources");
+            final Source source = Sources.file(base, fileName);
+            final RelProtoDataType protoRowType = RelDataTypeImpl.proto(builder.build());
+            schema.add("Person", new CsvScannableTable(source, protoRowType));
+        }
 
-        // SQL parsing
-        SqlParser parser = SqlParser.create("SELECT salary, name FROM Person");
-        // Parse the query into an AST
-        SqlNode sqlNode = parser.parseQuery();
-        System.out.println("[Parsed query]");
-        System.out.println(sqlNode.toString());
+        {
+            // Department table
+            RelDataTypeFactory.Builder builder = new RelDataTypeFactory.Builder(typeFactory);
+            builder.add("ID", typeFactory.createSqlType(SqlTypeName.INTEGER));
+            builder.add("Name", typeFactory.createSqlType(SqlTypeName.VARCHAR, 20));
+            builder.add("City", typeFactory.createSqlType(SqlTypeName.VARCHAR, 20));
+            String fileName = "department.csv";
+            final File base = new File("src/main/resources");
+            final Source source = Sources.file(base, fileName);
+            final RelProtoDataType protoRowType = RelDataTypeImpl.proto(builder.build());
+            schema.add("Department", new CsvScannableTable(source, protoRowType));
+        }
+//        sql_using_volcano(schema, typeFactory);
+        sql_using_hep(schema, typeFactory);
 
-        // Configure and instantiate validator
-        Properties props = new Properties();
-        props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
-        CalciteConnectionConfig config = new CalciteConnectionConfigImpl(props);
-        CalciteCatalogReader catalogReader = new CalciteCatalogReader(schema,
-                Collections.singletonList("bs"),
-                typeFactory, config);
+    }
 
-        SqlValidator validator = SqlValidatorUtil.newValidator(SqlStdOperatorTable.instance(),
-                catalogReader, typeFactory,
-                SqlValidator.Config.DEFAULT);
+    private static void sql_using_hep(CalciteSchema schema, RelDataTypeFactory typeFactory) throws SqlParseException {
+        String sql = "SELECT d.ID, COUNT(*) " +
+                "FROM (SELECT * FROM Person) p " +
+                "JOIN Department d ON p.DeparmentID = d.ID " +
+                "WHERE d.city = 'Ostrava' " +
+                "GROUP BY d.ID, 23";
+//        String sql = "SELECT * FROM Department";
+        RelOptPlanner planner = new HepPlanner(new HepProgramBuilder().build());
+//        planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+        RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
+        RelNode logPlan = generateLogicalPlan(schema, typeFactory, cluster, sql);
 
-        // Validate the initial AST
-        SqlNode validNode = validator.validate(sqlNode);
+        // Display the logical plan
+        System.out.println(
+                RelOptUtil.dumpPlan("[Logical plan before optimization]", logPlan, SqlExplainFormat.TEXT,
+                        SqlExplainLevel.NON_COST_ATTRIBUTES));
 
-        // Configure and instantiate the converter of the AST to Logical plan (requires opt cluster)
-        RelOptCluster cluster = newCluster(typeFactory);
-        SqlToRelConverter relConverter = new SqlToRelConverter(
-                NOOP_EXPANDER,
-                validator,
-                catalogReader,
-                cluster,
-                StandardConvertletTable.INSTANCE,
-                SqlToRelConverter.config());
+        // Initialize optimizer/planner with the necessary rules
+        planner.addRule(CoreRules.PROJECT_TO_CALC);
+        planner.addRule(CoreRules.FILTER_TO_CALC);
+        planner.addRule(CoreRules.PROJECT_JOIN_TRANSPOSE);
+//        planner.addRule(CoreRules.CALC_REDUCE_EXPRESSIONS);
+//        planner.addRule(CoreRules.PROJECT_REMOVE);
+//        planner.addRule(CoreRules.FILTER_AGGREGATE_TRANSPOSE);
+//        planner.addRule(CoreRules.AGGREGATE_PROJECT_PULL_UP_CONSTANTS);
+        planner.setRoot(logPlan);
+        RelNode newPlan = planner.findBestExp();
 
-        // Convert the valid AST into a logical plan
-        RelNode logPlan = relConverter.convertQuery(validNode, false, true).rel;
+        // Display the physical plan
+        System.out.println(
+                RelOptUtil.dumpPlan("[Plan after optimization]", newPlan, SqlExplainFormat.TEXT,
+                        SqlExplainLevel.NON_COST_ATTRIBUTES));
+
+    }
+
+    private static void sql_using_volcano(CalciteSchema schema, RelDataTypeFactory typeFactory) throws SqlParseException {
+        String sql = "SELECT salary, name FROM Person WHERE salary > 300";
+        RelOptPlanner planner = new VolcanoPlanner();
+//        RelOptPlanner planner = new HepPlanner(new HepProgramBuilder().build());
+        planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+        RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
+        RelNode logPlan = generateLogicalPlan(schema, typeFactory, cluster, sql);
 
         // Display the logical plan
         System.out.println(
                 RelOptUtil.dumpPlan("[Logical plan]", logPlan, SqlExplainFormat.TEXT,
                         SqlExplainLevel.NON_COST_ATTRIBUTES));
-//        TODO 3 - seznamit se vice s operandy RelNode a semantikou jejich vypisu
-
-
+//        TODO - seznamit se vice s operandy RelNode a semantikou jejich vypisu
+//        TODO - pouzit RelBuilder pro sestaveni logickeho planu
 
         // Initialize optimizer/planner with the necessary rules
-        RelOptPlanner planner = cluster.getPlanner();
         planner.addRule(CoreRules.PROJECT_TO_CALC);
         planner.addRule(CoreRules.FILTER_TO_CALC);
         planner.addRule(EnumerableRules.ENUMERABLE_CALC_RULE);
@@ -145,7 +171,7 @@ public class Main
 
 
         // Define the type of the output plan (in this case we want a physical plan in
-        // EnumerableContention)
+        // EnumerableConvention)
         logPlan = planner.changeTraits(logPlan,
                 cluster.traitSet().replace(EnumerableConvention.INSTANCE));
         planner.setRoot(logPlan);
@@ -167,7 +193,7 @@ public class Main
 
         // Run the executable plan using a context simply providing access to the schema
         System.out.println("[Query Output]");
-        for (Object row : executablePlan.bind(new SchemaOnlyDataContext(schema, (JavaTypeFactory)typeFactory)))
+        for (Object row : executablePlan.bind(new SchemaOnlyDataContext(schema, (JavaTypeFactory) typeFactory)))
         {
             if (row instanceof Object[]) {
                 System.out.println(Arrays.toString((Object[]) row));
@@ -175,19 +201,46 @@ public class Main
                 System.out.println(row);
             }
         }
-
-
-//        TODO 2 - pouzit RelBuilder pro sestaveni logickeho planu
     }
 
+    private static RelNode generateLogicalPlan(CalciteSchema schema, RelDataTypeFactory typeFactory, RelOptCluster cluster, String sql) throws SqlParseException {
+        // SQL parsing
+        SqlParser parser = SqlParser.create(sql);
+        // Parse the query into an AST
+        SqlNode sqlNode = parser.parseQuery();
+        System.out.println("[Parsed query]");
+        System.out.println(sqlNode.toString());
+
+        // Configure and instantiate validator
+        Properties props = new Properties();
+        props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
+        CalciteConnectionConfig config = new CalciteConnectionConfigImpl(props);
+        CalciteCatalogReader catalogReader = new CalciteCatalogReader(schema,
+                Collections.singletonList("bs"),
+                typeFactory, config);
+
+        SqlValidator validator = SqlValidatorUtil.newValidator(SqlStdOperatorTable.instance(),
+                catalogReader, typeFactory,
+                SqlValidator.Config.DEFAULT);
+
+        // Validate the initial AST
+        SqlNode validNode = validator.validate(sqlNode);
+
+        // Configure and instantiate the converter of the AST to Logical plan
+        SqlToRelConverter relConverter = new SqlToRelConverter(
+                NOOP_EXPANDER,
+                validator,
+                catalogReader,
+                cluster,
+                StandardConvertletTable.INSTANCE,
+                SqlToRelConverter.config());
+
+        // Convert the valid AST into a logical plan
+        RelNode logPlan = relConverter.convertQuery(validNode, false, true).rel;
+        return logPlan;
+    }
 
     private static final RelOptTable.ViewExpander NOOP_EXPANDER = (type, query, schema, path) -> null;
-
-    private static RelOptCluster newCluster(RelDataTypeFactory factory) {
-        RelOptPlanner planner = new VolcanoPlanner();
-        planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
-        return RelOptCluster.create(planner, new RexBuilder(factory));
-    }
 
 
     private static final class SchemaOnlyDataContext implements DataContext {
